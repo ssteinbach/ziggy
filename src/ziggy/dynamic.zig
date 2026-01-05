@@ -28,15 +28,41 @@ pub const Value = union(enum) {
             writer: *Writer,
         ) !void {
             switch (value) {
-                .bytes => |b| try writer.print("\"{}\"", .{std.zig.fmtEscapes(b)}),
-                .tag => |tag| try writer.print("@{s}(\"{}\")", .{ tag.name, std.zig.fmtEscapes(tag.bytes) }),
+                .bytes => |b| {
+                    try writer.writeAll("\"");
+                    for (b) |c| {
+                        switch (c) {
+                            '"' => try writer.writeAll("\\\""),
+                            '\\' => try writer.writeAll("\\\\"),
+                            '\n' => try writer.writeAll("\\n"),
+                            '\r' => try writer.writeAll("\\r"),
+                            '\t' => try writer.writeAll("\\t"),
+                            else => try writer.writeByte(c),
+                        }
+                    }
+                    try writer.writeAll("\"");
+                },
+                .tag => |tag| {
+                    try writer.print("@{s}(\"", .{tag.name});
+                    for (tag.bytes) |c| {
+                        switch (c) {
+                            '"' => try writer.writeAll("\\\""),
+                            '\\' => try writer.writeAll("\\\\"),
+                            '\n' => try writer.writeAll("\\n"),
+                            '\r' => try writer.writeAll("\\r"),
+                            '\t' => try writer.writeAll("\\t"),
+                            else => try writer.writeByte(c),
+                        }
+                    }
+                    try writer.writeAll("\")");
+                },
                 .kv => |kv| try Map(Value).ziggy_options.stringify(kv, opts, indent_level, depth, writer),
                 inline .bool, .integer, .float => |b| try writer.print("{}", .{b}),
                 .null => try writer.writeAll("null"),
                 .array => |array| {
                     try writer.writeAll("[");
                     for (array, 0..) |e, idx| {
-                        try e.ziggy_options.stringify(e, opts, indent_level, depth, writer);
+                        try Value.ziggy_options.stringify(e, opts, indent_level, depth, writer);
                         if (idx < array.len - 1) {
                             try writer.writeAll(", ");
                         }
