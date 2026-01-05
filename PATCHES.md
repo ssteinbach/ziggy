@@ -139,6 +139,55 @@ if (std.mem.eql(u8, src, "inf")) {
 
 **Rationale:** `std.fmt.parseFloat()` doesn't handle infinity/NaN strings. These values appear in ziggy files when serializing affine mappings with infinite bounds.
 
+### 8. Parser.zig - skip_fields support for struct parsing
+
+**Location:** `src/ziggy/Parser.zig:11-46, 151-195, 366-388, 585-645`
+
+**Change:** Added support for skipping struct fields during parsing without building value structures.
+
+New helper functions:
+```zig
+/// Helper to get the parse function from ziggy_options if it exists
+fn tryGetZiggyParse(comptime T: type) ?*const fn (*Parser, Token) Error!T
+
+/// Helper to get skip_fields from ziggy_options if it exists
+fn tryGetZiggySkipFields(comptime T: type) ?[]const std.meta.FieldEnum(T)
+
+/// Skip over a value without parsing it
+pub fn skipValue(self: *Parser, first_tok: Token) void
+
+/// Skip tokens until we find a matching closing delimiter
+fn skipUntilClosing(self: *Parser, open_tag: Token.Tag, close_tag: Token.Tag) void
+```
+
+Modified `parseValue()` to use `tryGetZiggyParse()` helper for checking custom parse functions.
+
+Modified `parseStruct()` to check for `skip_fields` and skip over field values:
+```zig
+if (comptime tryGetZiggySkipFields(T)) |skip_fields| {
+    if (std.meta.stringToEnum(std.meta.FieldEnum(T), field_name)) |field_enum| {
+        if (std.mem.indexOfScalar(std.meta.FieldEnum(T), skip_fields, field_enum) != null) {
+            self.skipValue(self.next());
+            // ... handle comma and continue
+        }
+    }
+}
+```
+
+**Usage in application code:**
+```zig
+pub const MyStruct = struct {
+    pub const ziggy_options = .{
+        .skip_fields = &[_]std.meta.FieldEnum(@This()){ .field_to_skip },
+    };
+
+    field_to_keep: []const u8,
+    field_to_skip: ?SomeLargeType = null, // Will be skipped during parse
+};
+```
+
+**Rationale:** Allows skipping expensive-to-parse fields (like metadata) when they're not needed. The skip happens at the struct parsing level, so tokenization still occurs but value construction is avoided.
+
 ## Upstream Status
 
 - **Bug version:** commit `4353b20` (Zig 0.15.x compatible)

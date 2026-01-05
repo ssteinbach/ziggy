@@ -8,6 +8,43 @@ const Token = Tokenizer.Token;
 const dynamic = @import("dynamic.zig");
 const Value = dynamic.Value;
 
+/// PATCHED: Helper to get the parse function from ziggy_options if it exists
+/// Works with both type-based ziggy_options (using @hasDecl) and struct-value-based (using @hasField)
+/// Returns null if no parse function exists
+fn tryGetZiggyParse(comptime T: type) ?*const fn (*Parser, Token) Error!T {
+    if (!@hasDecl(T, "ziggy_options")) return null;
+
+    const ZiggyOptionsType = @TypeOf(T.ziggy_options);
+    const type_info = @typeInfo(ZiggyOptionsType);
+    if (type_info == .type) {
+        // ziggy_options is a type - use @hasDecl
+        if (@hasDecl(T.ziggy_options, "parse")) {
+            return &T.ziggy_options.parse;
+        }
+    } else if (type_info == .@"struct") {
+        // ziggy_options is a struct value - check for parse field
+        if (@hasField(ZiggyOptionsType, "parse")) {
+            return &T.ziggy_options.parse;
+        }
+    }
+    return null;
+}
+
+/// PATCHED: Helper to get skip_fields from ziggy_options if it exists
+/// Returns null if no skip_fields exists
+fn tryGetZiggySkipFields(comptime T: type) ?[]const std.meta.FieldEnum(T) {
+    if (!@hasDecl(T, "ziggy_options")) return null;
+
+    const ZiggyOptionsType = @TypeOf(T.ziggy_options);
+    const type_info = @typeInfo(ZiggyOptionsType);
+    if (type_info == .@"struct") {
+        if (@hasField(ZiggyOptionsType, "skip_fields")) {
+            return T.ziggy_options.skip_fields;
+        }
+    }
+    return null;
+}
+
 gpa: std.mem.Allocator,
 code: [:0]const u8,
 opts: ParseOptions,
@@ -149,20 +186,22 @@ pub fn parseValue(
         .int => return self.parseInt(T, first_tok),
         .float => return self.parseFloat(T, first_tok),
         .@"struct" => {
-            if (@hasDecl(T, "ziggy_options") and @hasDecl(T.ziggy_options, "parse")) {
-                return T.ziggy_options.parse(self, first_tok);
+            // PATCHED: Check for parse function in ziggy_options
+            // ziggy_options can be either a type (with @hasDecl) or a struct value (with @hasField)
+            if (comptime tryGetZiggyParse(T)) |parse_fn| {
+                return parse_fn(self, first_tok);
             }
             return self.parseStruct(T, first_tok);
         },
         .@"union" => {
-            if (@hasDecl(T, "ziggy_options") and @hasDecl(T.ziggy_options, "parse")) {
-                return T.ziggy_options.parse(self, first_tok);
+            if (comptime tryGetZiggyParse(T)) |parse_fn| {
+                return parse_fn(self, first_tok);
             }
             return self.parseUnion(T, first_tok);
         },
         .@"enum" => {
-            if (@hasDecl(T, "ziggy_options") and @hasDecl(T.ziggy_options, "parse")) {
-                return T.ziggy_options.parse(self, first_tok);
+            if (comptime tryGetZiggyParse(T)) |parse_fn| {
+                return parse_fn(self, first_tok);
             }
             return self.parseEnum(T, first_tok);
         },
@@ -330,43 +369,25 @@ fn parseStruct(
         _ = try self.nextMust(.eql);
         const field_name = ident.loc.src(self.code);
 
-        if (@hasDecl(T, "ziggy_options") and @hasDecl(T.ziggy_options, "skip_fields")) blk: {
-            const skip_fields = T.ziggy_options.skip_fields;
-            if (@TypeOf(skip_fields) != []const std.meta.FieldEnum(T)) {
-                @compileError("ziggy_options.skip_fields must be a []const std.meta.FieldEnum(T)");
-            }
-
+        // PATCHED: Check if this field should be skipped entirely (skip over its value)
+        if (comptime tryGetZiggySkipFields(T)) |skip_fields| {
             if (std.meta.stringToEnum(
                 std.meta.FieldEnum(T),
                 field_name,
             )) |field_enum| {
-                if (std.mem.indexOfScalar(std.meta.FieldEnum(T), skip_fields, field_enum) == null) {
-                    break :blk;
+                if (std.mem.indexOfScalar(std.meta.FieldEnum(T), skip_fields, field_enum) != null) {
+                    // Skip over the value of this field without parsing it
+                    self.skipValue(self.next());
+                    tok = self.next();
+                    if (tok.tag == .comma) {
+                        tok = self.next();
+                    }
+                    continue; // Go to next field
                 }
             }
-
-            return self.addError(.{
-                .unknown_field = .{
-                    .name = ident.loc.src(self.code),
-                    .sel = ident.loc.getSelection(self.code),
-                },
-            });
         }
 
-        outer: inline for (info.fields, 0..) |f, idx| {
-            if (@hasDecl(T, "ziggy_options") and @hasDecl(T.ziggy_options, "skip_fields")) {
-                const skip_fields = T.ziggy_options.skip_fields;
-                if (@TypeOf(skip_fields) != []const std.meta.FieldEnum(T)) {
-                    @compileError("ziggy_options.skip_fields must be a []const std.meta.FieldEnum(T)");
-                }
-
-                const sf_idx: std.meta.FieldEnum(T) = @enumFromInt(idx);
-                inline for (skip_fields) |sf| {
-                    @setEvalBranchQuota(1000000);
-                    if (sf == sf_idx) continue :outer;
-                }
-            }
-
+        inline for (info.fields, 0..) |f, idx| {
             if (std.mem.eql(u8, f.name, field_name)) {
                 if (fields_seen[idx]) |first_loc| {
                     return self.addError(.{
@@ -582,6 +603,68 @@ fn parseFixedArray(
 
 pub fn next(self: *Parser) Token {
     return self.tokenizer.next(self.code);
+}
+
+/// PATCHED: Skip over a value without parsing it.
+/// This is used when we want to ignore certain fields during parsing.
+/// It handles nested structures, arrays, and primitives by tracking nesting depth.
+pub fn skipValue(self: *Parser, first_tok: Token) void {
+    const tok = first_tok;
+
+    // Handle simple values (primitives, strings, null, true, false, identifiers)
+    switch (tok.tag) {
+        .string, .integer, .float, .true, .false, .null, .line_string => {
+            // Handle multiline strings
+            if (tok.tag == .line_string) {
+                while (self.peek().tag == .line_string) {
+                    _ = self.next();
+                }
+            }
+            return;
+        },
+        .identifier => {
+            // Could be a union variant or an enum - peek to see if followed by struct
+            const next_tok = self.peek();
+            if (next_tok.tag == .lb) {
+                _ = self.next(); // consume the lb
+                self.skipUntilClosing(.lb, .rb);
+            }
+            return;
+        },
+        .at => {
+            // Tagged literal like @date("...") - skip until closing paren
+            self.skipUntilClosing(.lp, .rp);
+            return;
+        },
+        .lb => {
+            // Struct - skip until matching closing brace
+            self.skipUntilClosing(.lb, .rb);
+            return;
+        },
+        .lsb => {
+            // Array - skip until matching closing bracket
+            self.skipUntilClosing(.lsb, .rsb);
+            return;
+        },
+        else => {
+            // Unknown token type - just return
+            return;
+        },
+    }
+}
+
+/// Skip tokens until we find a matching closing delimiter, handling nesting.
+fn skipUntilClosing(self: *Parser, open_tag: Token.Tag, close_tag: Token.Tag) void {
+    var depth: u32 = 1;
+    while (depth > 0) {
+        const tok = self.next();
+        if (tok.tag == .eof) break;
+        if (tok.tag == open_tag) {
+            depth += 1;
+        } else if (tok.tag == close_tag) {
+            depth -= 1;
+        }
+    }
 }
 pub fn nextNoEof(
     self: *Parser,
