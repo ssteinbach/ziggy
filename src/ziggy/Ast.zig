@@ -796,8 +796,9 @@ pub fn check(
                 .integer => {},
                 else => try doc.typeMismatch(gpa, diag, rules, elem),
             },
+            // PATCHED: Accept both .float and .integer tokens for float types
             .float => switch (doc_node.tag) {
-                .float => {},
+                .float, .integer => {},
                 else => try doc.typeMismatch(gpa, diag, rules, elem),
             },
             .bool => switch (doc_node.tag) {

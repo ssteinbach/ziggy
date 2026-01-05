@@ -53,11 +53,24 @@ pub fn stringifyInner(
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
         .bool,
-        .float,
         .int,
-        .comptime_float,
         .comptime_int,
         => try writer.print("{}", .{value}),
+
+        // PATCHED: Always output floats with decimal point to ensure parser accepts them
+        // Integer-looking floats (1.0) would otherwise be output as "1" which
+        // the parser historically rejected when parsing back into f64 fields.
+        .float,
+        .comptime_float,
+        => {
+            const v: f64 = @floatCast(value);
+            if (@trunc(v) == v and !std.math.isInf(v) and !std.math.isNan(v)) {
+                // Force decimal point for whole numbers
+                try writer.print("{d:.1}", .{v});
+            } else {
+                try writer.print("{d}", .{v});
+            }
+        },
 
         .pointer => |ptr| {
             switch (ptr.size) {

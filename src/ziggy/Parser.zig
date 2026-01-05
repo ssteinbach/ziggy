@@ -174,7 +174,10 @@ pub fn parseValue(
                 return try self.parseValue(opt.child, first_tok);
             }
         },
-        else => @compileError("TODO"),
+        .array => |arr| {
+            return self.parseFixedArray(T, arr.child, arr.len, first_tok);
+        },
+        else => @compileError("TODO: unsupported type " ++ @typeName(T)),
     }
 }
 
@@ -235,24 +238,31 @@ fn parseUnion(
 
         for (info.fields) |f| {
             switch (@typeInfo(f.type)) {
-                .@"struct" => {},
+                .@"struct", .array => {},
                 else => {
-                    @compileError("all the cases of union '" ++ @typeName(T) ++ "' must be of struct type");
+                    @compileError("all the cases of union '" ++ @typeName(T) ++ "' must be of struct or array type");
                 },
             }
         }
     }
 
-    // TODO: check identifier for conformance
-    try self.must(first_tok, .identifier);
+    // PATCHED: Accept .null token as a union variant name in addition to .identifier
+    // The wrinkles schema uses "null" as a union variant name (e.g., SerializableMediaDataReference.null)
+    // but the tokenizer classifies "null" as a keyword token rather than an identifier.
+    try self.mustAny(first_tok, &.{ .identifier, .null });
     const case_name = first_tok.loc.src(self.code);
 
     inline for (info.fields) |f| {
         if (std.mem.eql(u8, f.name, case_name)) {
+            const field_info = @typeInfo(f.type);
             return @unionInit(
                 T,
                 f.name,
-                try self.parseStruct(f.type, self.next()),
+                switch (field_info) {
+                    .@"struct" => try self.parseStruct(f.type, self.next()),
+                    .array => |arr| try self.parseFixedArray(f.type, arr.child, arr.len, self.next()),
+                    else => unreachable,
+                },
             );
         }
     }
@@ -439,7 +449,10 @@ pub fn parseInt(self: *Parser, comptime T: type, num: Token) !T {
 pub fn parseFloat(self: *Parser, comptime T: type, num: Token) !T {
     assert(@typeInfo(T) == .float);
 
-    try self.must(num, .float);
+    // PATCHED: Accept both .float and .integer tokens for f64 parsing
+    // Integers like "1" are valid float values, but the original code only accepted "1.0"
+    // See libs/ziggy/PATCHES.md for details
+    try self.mustAny(num, &.{ .float, .integer });
     return std.fmt.parseFloat(T, num.loc.src(self.code)) catch {
         return self.addError(.overflow);
     };
@@ -504,6 +517,48 @@ fn parseArray(self: *Parser, comptime T: type, lsb: Token) !T {
             try self.must(tok, .rsb);
         }
     }
+}
+
+fn parseFixedArray(
+    self: *Parser,
+    comptime T: type,
+    comptime Child: type,
+    comptime len: usize,
+    lsb: Token,
+) !T {
+    try self.must(lsb, .lsb);
+
+    var result: T = undefined;
+    var tok = self.next();
+
+    inline for (0..len) |i| {
+        if (tok.tag == .rsb) {
+            return self.addError(.{
+                .unexpected = .{
+                    .name = tok.tag.lexeme(),
+                    .sel = tok.loc.getSelection(self.code),
+                    .expected = &.{},
+                },
+            });
+        }
+
+        result[i] = try self.parseValue(Child, tok);
+
+        tok = self.next();
+        if (tok.tag == .comma) {
+            tok = self.next();
+        } else if (i < len - 1) {
+            // Not at last element, but no comma - error
+            try self.must(tok, .comma);
+        }
+    }
+
+    // After parsing all elements, expect closing bracket
+    if (tok.tag != .rsb) {
+        try self.must(tok, .rsb);
+    }
+
+    return result;
 }
 
 pub fn next(self: *Parser) Token {

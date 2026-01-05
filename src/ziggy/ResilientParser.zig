@@ -484,8 +484,9 @@ pub const Tree = struct {
                     .integer => {},
                     else => try typeMismatch(gpa, rules, diag, elem, ziggy_code),
                 },
+                // PATCHED: Accept both .float and .integer tokens for float types
                 .float => switch (tree.tag) {
-                    .float => {},
+                    .float, .integer => {},
                     else => try typeMismatch(gpa, rules, diag, elem, ziggy_code),
                 },
                 .bool => switch (tree.tag) {
