@@ -292,8 +292,9 @@ pub fn next(self: *Tokenizer, code: [:0]const u8) Token {
                     break;
                 },
             },
+            // PATCHED: Added 'i', 'n', 'f', 'a' to support -inf, -nan, inf, nan tokens
             .number => switch (c) {
-                '0'...'9', '.', '_', '-', '+', 'e', 'E' => continue,
+                '0'...'9', '.', '_', '-', '+', 'e', 'E', 'i', 'n', 'f', 'a' => continue,
                 else => {
                     self.finishNumber(&res, code);
                     break;
@@ -434,6 +435,15 @@ fn finishIdentifier(self: Tokenizer, res: *Token, code: [:0]const u8) void {
 
 fn finishNumber(self: Tokenizer, res: *Token, code: [:0]const u8) void {
     res.loc.end = self.idx;
+    const src = res.loc.src(code);
+
+    // PATCHED: Handle -inf and -nan as valid float tokens
+    // std.zig.parseNumberLiteral doesn't recognize these special values
+    if (std.mem.eql(u8, src, "-inf") or std.mem.eql(u8, src, "-nan")) {
+        res.tag = .float;
+        return;
+    }
+
     // TODO: implement this natively
     var minus_minus = res.loc;
     if (minus_minus.src(code)[0] == '-') {

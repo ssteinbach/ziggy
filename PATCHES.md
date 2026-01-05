@@ -90,6 +90,55 @@ try self.mustAny(first_tok, &.{ .identifier, .null });
 
 **Rationale:** Belt-and-suspenders approach - ensures output from Zig serialization always produces parseable format, even if the parser patches were reverted.
 
+### 6. Tokenizer.zig - recognize inf/nan in number tokens
+
+**Location:** `src/ziggy/Tokenizer.zig:295-302, 435-444`
+
+**Change 1:** Extended number state to include `i`, `n`, `f`, `a` characters:
+```zig
+// Before:
+.number => switch (c) {
+    '0'...'9', '.', '_', '-', '+', 'e', 'E' => continue,
+
+// After:
+.number => switch (c) {
+    '0'...'9', '.', '_', '-', '+', 'e', 'E', 'i', 'n', 'f', 'a' => continue,
+```
+
+**Change 2:** Handle `-inf` and `-nan` in `finishNumber()`:
+```zig
+// Added at start of finishNumber():
+if (std.mem.eql(u8, src, "-inf") or std.mem.eql(u8, src, "-nan")) {
+    res.tag = .float;
+    return;
+}
+```
+
+**Rationale:** The serializer outputs infinity as `-inf`/`inf` and NaN as `-nan`/`nan`. The tokenizer needs to recognize these as valid float tokens so they can be parsed back.
+
+### 7. Parser.zig - parse inf/nan float values
+
+**Location:** `src/ziggy/Parser.zig:452-478`
+
+**Change:** Extended `parseFloat()` to accept `.identifier` tokens and handle special float values:
+```zig
+// Accept .identifier for "inf", "nan" (positive values)
+try self.mustAny(num, &.{ .float, .integer, .identifier });
+
+// Handle special values
+if (std.mem.eql(u8, src, "inf")) {
+    return std.math.inf(T);
+} else if (std.mem.eql(u8, src, "-inf")) {
+    return -std.math.inf(T);
+} else if (std.mem.eql(u8, src, "nan")) {
+    return std.math.nan(T);
+} else if (std.mem.eql(u8, src, "-nan")) {
+    return -std.math.nan(T);
+}
+```
+
+**Rationale:** `std.fmt.parseFloat()` doesn't handle infinity/NaN strings. These values appear in ziggy files when serializing affine mappings with infinite bounds.
+
 ## Upstream Status
 
 - **Bug version:** commit `4353b20` (Zig 0.15.x compatible)

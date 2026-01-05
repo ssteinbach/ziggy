@@ -452,11 +452,27 @@ pub fn parseInt(self: *Parser, comptime T: type, num: Token) !T {
 pub fn parseFloat(self: *Parser, comptime T: type, num: Token) !T {
     assert(@typeInfo(T) == .float);
 
-    // PATCHED: Accept both .float and .integer tokens for f64 parsing
-    // Integers like "1" are valid float values, but the original code only accepted "1.0"
+    // PATCHED: Accept .float, .integer, and .identifier tokens for f64 parsing
+    // - Integers like "1" are valid float values
+    // - Identifiers like "inf", "nan" are special float values (positive)
+    // - Float tokens include "-inf", "-nan" (negative specials from tokenizer patch)
     // See libs/ziggy/PATCHES.md for details
-    try self.mustAny(num, &.{ .float, .integer });
-    return std.fmt.parseFloat(T, num.loc.src(self.code)) catch {
+    try self.mustAny(num, &.{ .float, .integer, .identifier });
+
+    const src = num.loc.src(self.code);
+
+    // PATCHED: Handle inf/nan special values that std.fmt.parseFloat doesn't support
+    if (std.mem.eql(u8, src, "inf")) {
+        return std.math.inf(T);
+    } else if (std.mem.eql(u8, src, "-inf")) {
+        return -std.math.inf(T);
+    } else if (std.mem.eql(u8, src, "nan")) {
+        return std.math.nan(T);
+    } else if (std.mem.eql(u8, src, "-nan")) {
+        return -std.math.nan(T);
+    }
+
+    return std.fmt.parseFloat(T, src) catch {
         return self.addError(.overflow);
     };
 }
