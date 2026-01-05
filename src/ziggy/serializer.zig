@@ -306,6 +306,8 @@ fn stringifyUnion(writer: *Writer, un: anytype, indent_level: usize, depth: usiz
         if (std.mem.eql(u8, field.name, @tagName(at))) {
             switch (@typeInfo(field.type)) {
                 .@"struct" => try stringifyInner(@field(un, field.name), opts_, indent_level, depth, writer),
+                // Handle arrays and primitives directly without wrapping
+                .array, .int, .float, .bool => try stringifyInner(@field(un, field.name), opts_, indent_level, depth, writer),
                 else => {
                     const value_field: std.builtin.Type.StructField = .{
                         .name = "value",

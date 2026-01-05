@@ -238,9 +238,9 @@ fn parseUnion(
 
         for (info.fields) |f| {
             switch (@typeInfo(f.type)) {
-                .@"struct", .array => {},
+                .@"struct", .array, .int, .float, .bool => {},
                 else => {
-                    @compileError("all the cases of union '" ++ @typeName(T) ++ "' must be of struct or array type");
+                    @compileError("all the cases of union '" ++ @typeName(T) ++ "' must be of struct, array, or primitive type");
                 },
             }
         }
@@ -261,6 +261,9 @@ fn parseUnion(
                 switch (field_info) {
                     .@"struct" => try self.parseStruct(f.type, self.next()),
                     .array => |arr| try self.parseFixedArray(f.type, arr.child, arr.len, self.next()),
+                    .int => try self.parseInt(f.type, self.next()),
+                    .float => try self.parseFloat(f.type, self.next()),
+                    .bool => try self.parseBool(self.next()),
                     else => unreachable,
                 },
             );
