@@ -324,7 +324,7 @@ pub fn next(t: *Tokenizer, src: [:0]const u8, skip_comments: bool) Token {
         },
 
         .number => switch (src[t.idx]) {
-            '0'...'9', '.', '_', '-', '+', 'e', 'E' => {
+            '0'...'9', '.', '_', '-', '+', 'e', 'E', 'i', 'n', 'f', 'a' => {
                 t.idx += 1;
                 continue :state .number;
             },
@@ -448,6 +448,16 @@ pub fn next(t: *Tokenizer, src: [:0]const u8, skip_comments: bool) Token {
 
 fn finishNumber(t: Tokenizer, tok: *Token, src: [:0]const u8) void {
     tok.loc.end = t.idx;
+    const raw = tok.loc.slice(src);
+
+    // Handle -inf and -nan as valid float tokens.
+    // These are produced by the serializer for special float values
+    // but std.zig.parseNumberLiteral doesn't recognize them.
+    if (std.mem.eql(u8, raw, "-inf") or std.mem.eql(u8, raw, "-nan")) {
+        tok.tag = .float;
+        return;
+    }
+
     // TODO: implement this natively
     var minus_minus = tok.loc;
     if (minus_minus.slice(src)[0] == '-') {

@@ -331,10 +331,31 @@ pub fn deserializeOne(d: *const Deserializer, T: type, first: Token, top_lvl: bo
         },
         .comptime_float, .float => switch (first.tag) {
             .integer, .float => {
-                return std.fmt.parseFloat(T, first.loc.slice(d.src)) catch {
+                const src = first.loc.slice(d.src);
+                // Handle special float values that std.fmt.parseFloat doesn't support.
+                if (std.mem.eql(u8, src, "inf")) {
+                    return std.math.inf(T);
+                } else if (std.mem.eql(u8, src, "-inf")) {
+                    return -std.math.inf(T);
+                } else if (std.mem.eql(u8, src, "nan")) {
+                    return std.math.nan(T);
+                } else if (std.mem.eql(u8, src, "-nan")) {
+                    return -std.math.nan(T);
+                }
+                return std.fmt.parseFloat(T, src) catch {
                     // The token was already validated and parsing floats cannot overflow.
                     unreachable;
                 };
+            },
+            // Positive inf/nan are tokenized as identifiers.
+            .identifier => {
+                const src = first.loc.slice(d.src);
+                if (std.mem.eql(u8, src, "inf")) {
+                    return std.math.inf(T);
+                } else if (std.mem.eql(u8, src, "nan")) {
+                    return std.math.nan(T);
+                }
+                return d.unexpected(first);
             },
             else => return d.unexpected(first),
         },
