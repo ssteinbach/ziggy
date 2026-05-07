@@ -182,7 +182,7 @@ fn serializeStruct(
     if (omit_curlies) {
         _ = try s.serializeStructInner(strct, indent_level, depth);
     } else {
-        try w.writeAll(".{");
+        try w.writeAll("{");
         const any_fields = try s.serializeStructInner(strct, indent_level + 1, depth);
         if (any_fields) try s.indent(indent_level);
         try w.writeAll("}");
@@ -305,13 +305,24 @@ fn serializeUnion(
     // var opts_ = opts;
     // opts_.omit_top_level_curlies = false;
     const at = std.meta.activeTag(un);
-    try w.print(".{t}", .{at});
+    try w.print("{t}", .{at});
     inline for (U.fields) |field| {
         if (std.mem.eql(u8, field.name, @tagName(at))) {
             if (field.type != void) {
-                try w.writeAll("(");
-                try s.serializeOne(@field(un, field.name), indent_level, depth + 1);
-                try w.writeAll(")");
+                try w.writeAll(" ");
+                const FieldType = @typeInfo(field.type);
+                if (FieldType == .@"struct") {
+                    try w.writeAll("{");
+                    const any_fields = try s.serializeStructInner(
+                        @field(un, field.name),
+                        indent_level + 1,
+                        depth + 1,
+                    );
+                    if (any_fields) try s.indent(indent_level);
+                    try w.writeAll("}");
+                } else {
+                    try s.serializeOne(@field(un, field.name), indent_level, depth + 1);
+                }
             }
             break;
         }

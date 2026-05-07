@@ -32,40 +32,37 @@ pub const Dynamic = union(enum) {
             depth: usize,
         ) !void {
             const w = s.writer;
-            const opts = s.opts;
             switch (value) {
                 inline .bool, .integer, .float => |b| try w.print("{}", .{b}),
                 .null => try w.writeAll("null"),
-                .bytes => |b| try w.print(
-                    "\"{}\"",
-                    .{std.zig.fmtEscapes(b)},
-                ),
+                .bytes => |b| {
+                    try w.writeByte('"');
+                    try std.zig.stringEscape(b, w);
+                    try w.writeByte('"');
+                },
                 .@"enum" => |tag| try w.print(
                     ".{s}",
                     .{tag},
                 ),
                 .@"union" => |un| {
                     try w.print(".{s}(", .{un.tag});
-                    try un.value.ziggy_options.serialize(
+                    try s.serializeOne(
                         un.value.*,
-                        opts,
                         indent_level,
                         depth,
-                        w,
                     );
                     try w.writeAll(")");
                 },
                 .kv => |kv| try Dictionary(Dynamic).ziggy_options.serialize(
+                    s,
                     kv,
-                    opts,
                     indent_level,
                     depth,
-                    w,
                 ),
                 .array => |array| {
                     try w.writeAll("[");
                     for (array, 0..) |e, idx| {
-                        try e.ziggy_options.serialize(e, opts, indent_level, depth, w);
+                        try s.serializeOne(e, indent_level, depth);
                         if (idx < array.len - 1) {
                             try w.writeAll(", ");
                         }
@@ -93,16 +90,25 @@ pub const Dynamic = union(enum) {
                 .bytes, .bytes_line => return .{
                     .bytes = try d.deserializeOne([]const u8, first, false),
                 },
-                .identifier, .dotlb, .lb => return .{
+                .identifier => {
+                    if (d.peek() == .eql) {
+                        return .{
+                            .kv = try d.deserializeOne(Dictionary(Dynamic), first, top_lvl),
+                        };
+                    }
+                    return .{ .@"enum" = first.loc.slice(d.src)[1..] };
+                },
+                .dotlb, .lb => return .{
                     .kv = try d.deserializeOne(Dictionary(Dynamic), first, top_lvl),
                 },
-                .@"enum" => return .{ .@"enum" = first.loc.slice(d.src)[1..] },
                 .union_case => return .{
-                    .tag = blk: {
-                        const raw = first.loc.slice(d.src)[1..]; // skip '.'
-                        break :blk raw[0 .. raw.len - 1]; // skip '('
+                    .@"union" = .{
+                        .tag = blk: {
+                            const raw = first.loc.slice(d.src)[1..]; // skip '.'
+                            break :blk raw[0 .. raw.len - 1]; // skip '('
+                        },
+                        .value = try d.deserializeOne(*Dynamic, d.next(), false),
                     },
-                    .value = try d.deserializeOne(*Dynamic, d.next(), false),
                 },
                 .lsb => {
                     return .{

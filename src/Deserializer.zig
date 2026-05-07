@@ -160,6 +160,7 @@ pub const Error = error{
     DuplicateField,
     UnknownField,
     MissingField,
+    LengthMismatch,
 };
 
 /// Returns the next token, consuming it
@@ -347,8 +348,17 @@ pub fn deserializeOne(d: *const Deserializer, T: type, first: Token, top_lvl: bo
                     unreachable;
                 };
             },
-            // Positive inf/nan are tokenized as identifiers.
+            // Positive inf/nan are tokenized as identifiers or type_names.
             .identifier => {
+                const src = first.loc.slice(d.src);
+                if (std.mem.eql(u8, src, "inf")) {
+                    return std.math.inf(T);
+                } else if (std.mem.eql(u8, src, "nan")) {
+                    return std.math.nan(T);
+                }
+                return d.unexpected(first);
+            },
+            .type_name => {
                 const src = first.loc.slice(d.src);
                 if (std.mem.eql(u8, src, "inf")) {
                     return std.math.inf(T);
@@ -426,10 +436,30 @@ pub fn deserializeOne(d: *const Deserializer, T: type, first: Token, top_lvl: bo
                         }
                     } else return d.unknownField(first);
                 },
+                .type_name, .null, .true, .false => {
+                    const tag = first.loc.slice(d.src);
+
+                    inline for (info.fields) |f| {
+                        if (std.mem.eql(u8, f.name, tag)) {
+                            if (f.type == void) {
+                                return @unionInit(T, f.name, {});
+                            }
+                            return @unionInit(
+                                T,
+                                f.name,
+                                try d.deserializeOne(
+                                    f.type,
+                                    d.next(),
+                                    false,
+                                ),
+                            );
+                        }
+                    } else return d.unknownField(first);
+                },
                 else => return d.unexpected(first),
             }
         },
-        .array, .vector => |info| {
+        inline .array, .vector => |info| {
             var arr: T = undefined;
 
             if (first.tag != .lsb) return d.unexpected(first);
@@ -446,20 +476,28 @@ pub fn deserializeOne(d: *const Deserializer, T: type, first: Token, top_lvl: bo
 
                 elem.* = try d.deserializeOne(
                     info.child,
-                    d.next(),
+                    tok,
                     false,
                 );
 
                 switch (d.peek()) {
                     .comma => {
                         _ = d.next();
+                        // Handle trailing comma before ]
+                        if (d.peek() == .rsb) {
+                            const rsb_tok = d.next();
+                            return if (idx == arr.len - 1) arr else d.lengthMismatch(rsb_tok);
+                        }
                         continue;
                     },
-                    .rsb => return if (idx == arr.len - 1) arr else d.lengthMismatch(next),
+                    .rsb => {
+                        const rsb_tok = d.next();
+                        return if (idx == arr.len - 1) arr else d.lengthMismatch(rsb_tok);
+                    },
                     else => return d.unexpected(d.next()),
                 }
             }
-            comptime unreachable;
+            unreachable;
         },
         .@"struct" => |info| {
             if (@hasDecl(T, "ziggy_options") and
@@ -652,6 +690,40 @@ inline fn deserializeDict(
     assert(first.tag == .lb);
 
     var field_token = d.next();
+    // If the first token after '{' is an identifier (dot-prefixed field),
+    // treat this as a struct in braces (not a dict with quoted keys).
+    if (field_token.tag == .identifier) {
+        outer: while (true) {
+            switch (field_token.tag) {
+                .identifier => {},
+                .rb => {
+                    try d.finalizeStruct(result, info, seen, field_token);
+                    return result.*;
+                },
+                else => return d.unexpected(field_token),
+            }
+            const name = field_token.loc.slice(d.src)[1..]; // skip '.'
+            const eql = d.next();
+            if (eql.tag != .eql) return d.unexpected(eql);
+
+            inline for (info.fields, 0..) |f, idx| {
+                if (std.mem.eql(u8, f.name, name)) {
+                    if (seen.isSet(idx))
+                        return d.duplicateField(field_token);
+                    seen.set(idx);
+                    @field(result, f.name) = try d.deserializeOne(
+                        f.type,
+                        d.next(),
+                        false,
+                    );
+                    if (d.peek() == .comma) _ = d.next();
+                    field_token = d.next();
+                    continue :outer;
+                }
+            } else return d.unknownField(field_token);
+        }
+        comptime unreachable;
+    }
     outer: while (true) {
         switch (field_token.tag) {
             .bytes => {},

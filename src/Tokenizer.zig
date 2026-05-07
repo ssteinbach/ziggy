@@ -57,6 +57,7 @@ pub const Token = struct {
         rsb,
         identifier,
         union_case,
+        type_name, // bare identifier (e.g. track, clip) used as tagged union name
         bytes,
         bytes_line,
         integer,
@@ -299,7 +300,7 @@ pub fn next(t: *Tokenizer, src: [:0]const u8, skip_comments: bool) Token {
                     tok.tag = .false;
                 } else if (std.mem.eql(u8, slice, "null")) {
                     tok.tag = .null;
-                } else tok.tag = .invalid;
+                } else tok.tag = .type_name;
 
                 return tok;
             },
