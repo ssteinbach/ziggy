@@ -590,6 +590,11 @@ pub fn deserializeOne(d: *const Deserializer, T: type, first: Token, top_lvl: bo
                 .lb => return try d.deserializeDict(T, &result, info, &seen, first),
                 .dotlb => blk: {
                     const tok = try d.next();
+                    if (tok.tag == .rb) {
+                        // empty struct: `.{}`
+                        try d.finalizeStruct(&result, info, &seen, tok);
+                        return result;
+                    }
                     if (tok.tag != .identifier) return d.unexpected(tok);
                     break :blk tok;
                 },
@@ -1041,6 +1046,57 @@ test "union" {
     const result = try deserializeLeaky(Case, arena, case, &meta, .{});
 
     try std.testing.expectEqualStrings("2020-07-06T00:00:00", result.date);
+}
+
+test "struct - empty" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var meta: Meta = undefined;
+
+    const Empty = struct {};
+    const Defaults = struct { a: u8 = 7, b: ?bool = null };
+    const Required = struct { a: u8 };
+    const Case = struct {
+        empty: Empty,
+        defaults: Defaults,
+        kind: union(enum) { picture: Empty, other: Defaults },
+    };
+
+    const c = try deserializeLeaky(
+        Case,
+        arena,
+        ".empty = .{}, .defaults = .{ }, .kind = .picture(.{})",
+        &meta,
+        .{},
+    );
+    try std.testing.expectEqual(Defaults{}, c.defaults);
+    try std.testing.expect(c.kind == .picture);
+
+    try std.testing.expectError(
+        error.MissingField,
+        deserializeLeaky(struct { r: Required }, arena, ".r = .{}", &meta, .{}),
+    );
+}
+
+test "struct - empty round-trips through the serializer" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var meta: Meta = undefined;
+
+    const Domain = union(enum) { picture: struct {}, other: struct { name: []const u8 } };
+    const Case = struct { domains: []const Domain };
+    const value: Case = .{ .domains = &.{ .{ .picture = .{} }, .{ .other = .{ .name = "x" } } } };
+
+    var aw: Io.Writer.Allocating = .init(arena);
+    try root.serialize(value, .{}, &aw.writer);
+    const src = try arena.dupeSentinel(u8, aw.written(), 0);
+
+    const result = try deserializeLeaky(Case, arena, src, &meta, .{});
+    try std.testing.expectEqual(2, result.domains.len);
+    try std.testing.expect(result.domains[0] == .picture);
+    try std.testing.expectEqualStrings("x", result.domains[1].other.name);
 }
 
 test "int basics" {
