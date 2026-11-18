@@ -112,6 +112,7 @@ pub const Meta = struct {
             error.DuplicateField => "duplicate field",
             error.UnknownField => "unknown field",
             error.MissingField => "missing field",
+            error.LengthMismatch => "array length mismatch",
 
             // Invalid escape sequences, etc. are always caught by the parser.
             error.InvalidEscapeSequence,
@@ -134,7 +135,7 @@ pub const Meta = struct {
             error.InvalidControlByte,
             error.InvalidUtf8,
             => unreachable, // handled above
-            error.Overflow => {},
+            error.Overflow, error.LengthMismatch => {},
             error.UnexpectedToken,
             error.UnexpectedValue,
             error.DuplicateField,
@@ -215,6 +216,7 @@ pub const Error = error{
     DuplicateField,
     UnknownField,
     MissingField,
+    LengthMismatch,
 } || NextError;
 
 const NextError = error{ InvalidEscapeSequence, InvalidControlByte, InvalidUtf8 };
@@ -521,8 +523,10 @@ pub fn deserializeOne(d: *const Deserializer, T: type, first: Token, top_lvl: bo
                 else => return d.unexpectedValue(first),
             }
         },
-        .array, .vector => |info| {
-            var arr: T = undefined;
+        inline .array, .vector => |info| {
+            // Vectors can't be iterated by pointer, so always fill an array
+            // and let it coerce to `T` on return.
+            var arr: [info.len]info.child = undefined;
 
             if (first.tag != .lsb) return d.unexpectedValue(first);
             if (arr.len == 0) {
@@ -538,7 +542,7 @@ pub fn deserializeOne(d: *const Deserializer, T: type, first: Token, top_lvl: bo
 
                 elem.* = try d.deserializeOne(
                     info.child,
-                    try d.next(),
+                    tok,
                     false,
                 );
 
@@ -547,11 +551,17 @@ pub fn deserializeOne(d: *const Deserializer, T: type, first: Token, top_lvl: bo
                         _ = try d.next();
                         continue;
                     },
-                    .rsb => return if (idx == arr.len - 1) arr else d.lengthMismatch(next),
+                    .rsb => {
+                        const rsb = try d.next();
+                        return if (idx == arr.len - 1) arr else d.lengthMismatch(rsb);
+                    },
                     else => return d.unexpected(try d.next()),
                 }
             }
-            comptime unreachable;
+
+            // Every slot is filled but the last element was followed by a
+            // comma instead of ']'.
+            return d.lengthMismatch(try d.next());
         },
         .@"struct" => |info| {
             if (root.getOptions(T)) |opt| if (opt.deserialize) |des| {
@@ -1129,6 +1139,58 @@ test "array trailing comma" {
     const result = try deserializeLeaky([]usize, arena, case, &meta, .{});
 
     try std.testing.expectEqualSlices(usize, &.{ 1, 2, 3 }, result);
+}
+
+test "fixed-size array basics" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var meta: Meta = undefined;
+
+    const arr = try deserializeLeaky([3]usize, arena, "[1, 2, 3]", &meta, .{});
+    try std.testing.expectEqual([3]usize{ 1, 2, 3 }, arr);
+
+    const nested = try deserializeLeaky(
+        [2][2]f64,
+        arena,
+        "[[0, 1.5], [2, inf]]",
+        &meta,
+        .{},
+    );
+    try std.testing.expectEqual(
+        [2][2]f64{ .{ 0, 1.5 }, .{ 2, std.math.inf(f64) } },
+        nested,
+    );
+
+    const vec = try deserializeLeaky(@Vector(2, i64), arena, "[-1, 7]", &meta, .{});
+    try std.testing.expectEqual(@Vector(2, i64){ -1, 7 }, vec);
+
+    const empty = try deserializeLeaky([0]usize, arena, "[]", &meta, .{});
+    try std.testing.expectEqual([0]usize{}, empty);
+
+    const Case = struct { bounds: [2]i64 };
+    const c = try deserializeLeaky(Case, arena, ".bounds = [1, 193]", &meta, .{});
+    try std.testing.expectEqual([2]i64{ 1, 193 }, c.bounds);
+}
+
+test "fixed-size array length mismatch" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var meta: Meta = undefined;
+
+    try std.testing.expectError(
+        error.LengthMismatch,
+        deserializeLeaky([3]usize, arena, "[1, 2]", &meta, .{}),
+    );
+    try std.testing.expectError(
+        error.LengthMismatch,
+        deserializeLeaky([3]usize, arena, "[1, 2, 3, 4]", &meta, .{}),
+    );
+    try std.testing.expectError(
+        error.LengthMismatch,
+        deserializeLeaky([0]usize, arena, "[1]", &meta, .{}),
+    );
 }
 
 test "comments are ignored" {
