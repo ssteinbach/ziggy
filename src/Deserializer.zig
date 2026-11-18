@@ -536,9 +536,9 @@ pub fn deserializeOne(d: *const Deserializer, T: type, first: Token, top_lvl: bo
 
             for (&arr, 0..) |*elem, idx| {
                 const tok = try d.next();
-                if (tok.tag == .rsb) {
-                    return if (idx == arr.len - 1) arr else d.lengthMismatch(tok);
-                }
+                // ']' where element `idx` should be (e.g. `[1, 2,]` for a
+                // `[3]T`): there are fewer elements than slots.
+                if (tok.tag == .rsb) return d.lengthMismatch(tok);
 
                 elem.* = try d.deserializeOne(
                     info.child,
@@ -559,9 +559,11 @@ pub fn deserializeOne(d: *const Deserializer, T: type, first: Token, top_lvl: bo
                 }
             }
 
-            // Every slot is filled but the last element was followed by a
-            // comma instead of ']'.
-            return d.lengthMismatch(try d.next());
+            // Every slot is filled and the last element was followed by a
+            // comma: accept a trailing comma, anything else means there are
+            // more elements than slots.
+            const end = try d.next();
+            return if (end.tag == .rsb) arr else d.lengthMismatch(end);
         },
         .@"struct" => |info| {
             if (root.getOptions(T)) |opt| if (opt.deserialize) |des| {
@@ -1246,6 +1248,50 @@ test "fixed-size array length mismatch" {
     try std.testing.expectError(
         error.LengthMismatch,
         deserializeLeaky([0]usize, arena, "[1]", &meta, .{}),
+    );
+}
+
+test "fixed-size array trailing comma" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var meta: Meta = undefined;
+
+    // parse correctly w/ trailing comma
+
+    const from_single_line = try deserializeLeaky(
+        [3]usize,
+        arena,
+        "[1, 2, 3, ]",
+        &meta,
+        .{},
+    );
+    try std.testing.expectEqual([3]usize{ 1, 2, 3 }, from_single_line);
+
+    const from_multiline = try deserializeLeaky(
+        [2]i64,
+        arena,
+        \\[
+        \\    1,
+        \\    193,
+        \\]
+    ,
+        &meta,
+        .{},
+    );
+    try std.testing.expectEqual([2]i64{ 1, 193 }, from_multiline);
+
+    // Errors
+
+    // Too few elements in the string (+ trailing comma)
+    try std.testing.expectError(
+        error.LengthMismatch,
+        deserializeLeaky([3]usize, arena, "[1, 2, ]", &meta, .{}),
+    );
+    // Too many elements in the string (+ trailing comma)
+    try std.testing.expectError(
+        error.LengthMismatch,
+        deserializeLeaky([3]usize, arena, "[1, 2, 3, 4, ]", &meta, .{}),
     );
 }
 
